@@ -8,6 +8,9 @@ import getopt
 import time
 import logging
 
+from datetime import datetime
+from influxdb import InfluxDBClient
+
 PROMETHEUS_URL = ''
 QUERY_API = '/api/v1/query'
 RANGE_QUERY_API = '/api/v1/query_range'
@@ -23,7 +26,9 @@ def main():
     metricnames = query_metric_names()
     logging.info("Querying metric names succeeded, metric number: %s", len(metricnames))
 
-    forward_metric_values(metricnames=metricnames)
+    client = InfluxDBClient('amtrm-influxdb.dev-amtrm-sketch0001.ash11.ftdns.net', 80)
+    client.switch_database('telegraf')
+    pull_metric_values(client, metricnames)
 
 def handle_args(argv):
     global PROMETHEUS_URL
@@ -69,8 +74,6 @@ def handle_args(argv):
     if args:
         SELECTOR = ",".join(args)
 
-    import ptpdb
-    ptpdb.set_trace()
 
 def print_help_info():
     print('')
@@ -100,7 +103,7 @@ def query_metric_names():
     return metricnames
 
 
-def forward_metric_values(metricnames):
+def pull_metric_values(values, client, metricnames):
     if PERIOD != '':
         end_time = int(time.time())
         start_time = end_time - PERIOD
@@ -113,7 +116,21 @@ def forward_metric_values(metricnames):
         logging.info(response.request.url)
         results = response.json()['data']['result']
         for element in results:
-            print(element)
+            for value in element['values']:
+                measurement = element['metric']['__name__']
+                time = datetime.fromtimestamp(value[0]).isoformat()
+                tags = element['metric']
+                field = value[1]
+                values[measurement][time] = add_time(values[measurement], time)
+                values[measurement]['tags'] = add_tags(values[measurement], tags)
+                values[measurement][time]['fields'] = add_fields(values[measurement][time], field)
+                #client.write_points([{
+                #    "measurement": element['metric']['__name__'],
+                #    "fields": { "value": value[1] },
+                #    "tags": element['metric'],
+                #    "time": datetime.fromtimestamp(value[0]).isoformat()
+                #    }])
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
