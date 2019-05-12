@@ -19,6 +19,24 @@ START = '' # rfc3339 | unix_timestamp
 END = '' # rfc3339 | unix_timestamp
 PERIOD = '' # unit: second
 SELECTOR = '__name__=~".+"'
+INFUXDB_HOST = ''
+INFUXDB_PORT = 8086
+INFUXDB_DATABASE = 'telegraf'
+INFUXDB_MEASUREMENT = ''
+
+
+def add_time(d, time):
+    return d[time] if time in d else {}
+
+
+def add_tags(d, tags):
+    return d[tags] if tags in d else {}
+
+
+def add_fields(d, metric, value):
+    d[metric] = value
+    return d
+
 
 def main():
     handle_args(sys.argv[1:])
@@ -26,9 +44,11 @@ def main():
     metricnames = query_metric_names()
     logging.info("Querying metric names succeeded, metric number: %s", len(metricnames))
 
-    client = InfluxDBClient('amtrm-influxdb.dev-amtrm-sketch0001.ash11.ftdns.net', 80)
-    client.switch_database('telegraf')
-    pull_metric_values(client, metricnames)
+    logging.info("Connect to InfluxDB {}:{}, database {}".format(INFUXDB_HOST, INFUXDB_PORT, INFUXDB_DATABASE))
+    client = InfluxDBClient(INFUXDB_HOST, INFUXDB_PORT)
+    client.switch_database(INFUXDB_DATABASE)
+    push_metric_values(client, pull_metric_values(metricnames))
+
 
 def handle_args(argv):
     global PROMETHEUS_URL
@@ -37,9 +57,16 @@ def handle_args(argv):
     global END
     global PERIOD
     global SELECTOR
+    global INFUXDB_HOST
+    global INFUXDB_PORT
+    global INFUXDB_DATABASE
+    global INFUXDB_MEASUREMENT
 
     try:
-        opts, args = getopt.getopt(argv, "h:c:s:p:", ["host=", "container=", "step=", "period=", "help", "start=", "end="])
+        opts, args = getopt.getopt(argv, "h:c:s:p:i:j:d:m:",
+                ["host=", "container=", "step=", "period=",
+                    "ihost", "iport", "database", "measurement",
+                    "help", "start=", "end="])
     except getopt.GetoptError as error:
         logging.error(error)
         print_help_info()
@@ -59,9 +86,25 @@ def handle_args(argv):
             END = arg
         elif opt == "--period":
             PERIOD = int(arg)
+        elif opt in ("-i", "--ihost"):
+            INFUXDB_HOST = arg
+        elif opt in ("-j", "--iport"):
+            INFUXDB_PORT = arg
+        elif opt in ("-d", "--database"):
+            INFUXDB_DATABASE = arg
+        elif opt in ("-m", "--measurement"):
+            INFUXDB_MEASUREMENT = arg
 
     if PROMETHEUS_URL == '':
         logging.error("You should use -h or --host to specify your prometheus server's url, e.g. http://prometheus:9090")
+        print_help_info()
+        sys.exit(2)
+    if INFUXDB_HOST == '':
+        logging.error("You should use -ih or --influxdb_host to specify your influxdb server's url, e.g. influxdb")
+        print_help_info()
+        sys.exit(2)
+    if INFUXDB_MEASUREMENT == '':
+        logging.error("You should use -im or --influxdb_measurement to specify your influxdb measurement's name, e.g. my_measurement")
         print_help_info()
         sys.exit(2)
 
@@ -77,15 +120,15 @@ def handle_args(argv):
 
 def print_help_info():
     print('')
-    print('Metrics2StatsD Help Info')
-    print('    metrics2statsd.py -h <prometheus_url> label_selector')
-    print('or: metrics2statsd.py --host=<prometheus_url> label_selector')
+    print('Metrics2infuxdb Help Info')
+    print('    Metrics2influxdb.py -h <prometheus_url> label_selector')
+    print('or: metrics2influxdb.py --host=<prometheus_url> label_selector')
     print('---')
     print('Additional options: --start=<start_timestamp_or_rfc3339> --end=<end_timestamp_or_rfc3339> --period=<get_for_most_recent_period(int seconds)>')
     print('                    use start&end or only use period')
 
+
 def query_metric_names():
-    print('sum by(__name__)({{{}}})'.format(SELECTOR))
     response = requests.get(PROMETHEUS_URL + QUERY_API, params={'query': 'sum by(__name__)({{{}}})'.format(SELECTOR)})
     logging.info("Request {}".format(response.request.url))
     status = response.json()['status']
@@ -103,7 +146,8 @@ def query_metric_names():
     return metricnames
 
 
-def pull_metric_values(values, client, metricnames):
+def pull_metric_values(metricnames):
+    values = {}
     if PERIOD != '':
         end_time = int(time.time())
         start_time = end_time - PERIOD
@@ -116,20 +160,28 @@ def pull_metric_values(values, client, metricnames):
         logging.info(response.request.url)
         results = response.json()['data']['result']
         for element in results:
+            metric = element['metric']['__name__']
+            element['metric'].pop('job')
+            element['metric'].pop('__name__')
+            tags = tuple(sorted(element['metric'].items()))
             for value in element['values']:
-                measurement = element['metric']['__name__']
-                time = datetime.fromtimestamp(value[0]).isoformat()
-                tags = element['metric']
-                field = value[1]
-                values[measurement][time] = add_time(values[measurement], time)
-                values[measurement]['tags'] = add_tags(values[measurement], tags)
-                values[measurement][time]['fields'] = add_fields(values[measurement][time], field)
-                #client.write_points([{
-                #    "measurement": element['metric']['__name__'],
-                #    "fields": { "value": value[1] },
-                #    "tags": element['metric'],
-                #    "time": datetime.fromtimestamp(value[0]).isoformat()
-                #    }])
+                isotime = datetime.fromtimestamp(value[0]).isoformat()
+                value = value[1]
+                values[tags] = add_tags(values, tags)
+                values[tags][isotime] = add_time(values[tags], isotime)
+                values[tags][isotime] = add_fields(values[tags][isotime], metric, value)
+    return values
+
+
+def push_metric_values(client, values):
+    for (tags, n) in values.items():
+        for (isotime, fields) in n.items():
+            logging.info("Write measurement {} with {} fields to InfluxDB".format(INFUXDB_MEASUREMENT, len(fields)))
+            client.write_points([{
+                "measurement": INFUXDB_MEASUREMENT,
+                "fields": fields,
+                "tags": dict(tags),
+                "time": isotime}])
 
 
 if __name__ == "__main__":
