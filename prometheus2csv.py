@@ -174,14 +174,16 @@ def pull_metric_values(metricnames):
 
 
 def push_metric_values(client, values):
+    points=[]
     for (tags, n) in values.items():
         for (isotime, fields) in n.items():
-            logging.info("Write measurement {} with {} fields to InfluxDB".format(INFUXDB_MEASUREMENT, len(fields)))
-            client.write_points([{
+            points.append({
                 "measurement": INFUXDB_MEASUREMENT,
                 "fields": fields,
                 "tags": dict(tags),
-                "time": isotime}])
+                "time": isotime})
+    logging.info("Write {} {} measurements to InfluxDB".format(len(points), INFUXDB_MEASUREMENT))
+    client.write_points(points)
 
 
 if __name__ == "__main__":
